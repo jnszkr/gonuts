@@ -1,0 +1,116 @@
+version: 1
+name: shop
+go:
+  package: shopnats
+encoding: json
+
+models:
+  LineItem:
+    fields:
+      sku: string
+      quantity: int
+  OrderPlaced:
+    description: A customer completed checkout.
+    fields:
+      id: uuid
+      total_cents: int64
+      items: "[]LineItem"
+      note: { type: string, optional: true }
+  OrderShipped:
+    fields:
+      id: uuid
+      carrier: string
+  GetOrder:
+    fields:
+      id: uuid
+  Order:
+    fields:
+      id: uuid
+      status: string
+  Cart:
+    fields:
+      items: "[]LineItem"
+  CartSweep:
+    fields:
+      older_than: string
+
+events:
+  order.placed:
+    subject: orders.placed.{region}
+    model: OrderPlaced
+  order.shipped:
+    subject: orders.shipped.{region}
+    model: OrderShipped
+  cart.sweep:
+    subject: carts.sweep
+    model: CartSweep
+  price.changed: # no stream covers this, so it is core pub/sub
+    subject: prices.changed.{sku}
+    model: LineItem
+
+streams:
+  ORDERS:
+    events: [order.placed, order.shipped] # subjects derived from the events
+    retention: limits
+    storage: file
+    replicas: 1
+    max_age: 720h
+    duplicate_window: 2m
+    deny_delete: true
+  CARTS:
+    events: [cart.sweep]
+    subjects: ["carts.schedules.>"]
+    replicas: 1
+    allow_msg_schedules: true
+
+consumers:
+  billing-orders:
+    stream: ORDERS
+    events: [order.placed]
+    max_deliver: 5
+    backoff: [30s, 1m, 2m, 5m] # NATS also uses the first entry as ack_wait
+    max_ack_pending: 500
+  fulfillment-orders:
+    stream: ORDERS
+    events: [order.placed, order.shipped]
+    ack_wait: 30s
+
+kv:
+  carts:
+    key: "{user_id}"
+    model: Cart
+    history: 5
+    ttl: 24h
+    replicas: 1
+
+schedules:
+  nightly-cart-sweep:
+    stream: CARTS
+    subject: carts.schedules.sweep
+    event: cart.sweep
+    payload: { older_than: 24h }
+    cron: "0 0 3 * * *"
+    time_zone: Europe/Budapest
+
+requests:
+  orders:
+    timeout: 2s
+    queue_group: orders
+    endpoints:
+      Get:
+        subject: orders.api.get
+        request: GetOrder
+        reply: Order
+        errors: [NotFound]
+
+services:
+  checkout:
+    publishes: [order.placed]
+    subscribes: [price.changed]
+    calls: [orders.Get]
+    kv: { carts: readwrite }
+  orders-api:
+    serves: [orders]
+  billing:
+    consumes: [billing-orders]
+    publishes: [order.shipped]
