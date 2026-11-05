@@ -121,13 +121,18 @@ type Entry[T any] struct {
 // Watch calls fn with the latest value of each key and then with every change.
 // Values that cannot be decoded are skipped.
 func (b *Bucket[T]) Watch(ctx context.Context, fn func(Entry[T])) (stop func(), err error) {
-	kv, err := b.bind(ctx)
+	var w jetstream.KeyWatcher
+	// The watch outlives this call, so it keeps the caller's context rather than
+	// one a plugin may cancel on return.
+	err = b.do(ctx, ">", func(_ context.Context, kv jetstream.KeyValue) error {
+		var err error
+		if w, err = kv.WatchAll(ctx); err != nil {
+			return fmt.Errorf("nuts: watch %s: %w", b.name, err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	w, err := kv.WatchAll(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("nuts: watch %s: %w", b.name, err)
 	}
 	go func() {
 		for e := range w.Updates() {
