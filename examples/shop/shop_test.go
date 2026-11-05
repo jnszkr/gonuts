@@ -306,6 +306,7 @@ func TestCommittedOutputMatchesTheSpec(t *testing.T) {
 	for _, args := range [][]string{
 		{"generate", "--check", "--spec", "nuts.yaml", "--out", "gen"},
 		{"generate", "--check", "--spec", "nuts.yaml", "--terraform", "--terraform-out", "terraform"},
+		{"generate", "--check", "--spec", "nuts.yaml", "--permissions", "--permissions-out", "permissions"},
 	} {
 		if code := cli.Run(args, os.Stdout, os.Stderr); code != 0 {
 			t.Fatalf("%v exited %d; run make generate", args, code)

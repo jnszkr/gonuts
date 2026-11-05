@@ -58,10 +58,12 @@ Generate flags. With no component flag, all Go code and no Terraform:
   --rr-client       Request functions
   --rr-server       Handler interfaces and server wiring
   --terraform       Streams, consumers and buckets for the NATS JetStream provider
+  --permissions     NATS server permissions for each service
 
   --spec PATH            Spec file (default nuts.yaml)
   --out DIR              Go output directory (default gen/nuts)
   --terraform-out DIR    Terraform output directory (default terraform)
+  --permissions-out DIR  Permissions output directory (default permissions)
   --service NAME         Generate only what this service uses
   --import-path PATH     Import path of --out (default: detected from go.mod)
   --check                Fail if the output on disk is out of date; writes nothing
@@ -155,9 +157,11 @@ func (c *command) generate(args []string) int {
 	fs.BoolVar(&comps.RRClient, "rr-client", false, "request functions")
 	fs.BoolVar(&comps.RRServer, "rr-server", false, "handler interfaces and server wiring")
 	terraform := fs.Bool("terraform", false, "Terraform for the NATS JetStream provider")
+	permissions := fs.Bool("permissions", false, "NATS server permissions for each service")
 	specPath := fs.String("spec", "nuts.yaml", "spec file")
 	outDir := fs.String("out", filepath.Join("gen", "nuts"), "Go output directory")
 	tfDir := fs.String("terraform-out", "terraform", "Terraform output directory")
+	permsDir := fs.String("permissions-out", "permissions", "permissions output directory")
 	service := fs.String("service", "", "generate only what this service uses")
 	importPath := fs.String("import-path", "", "import path of --out")
 	check := fs.Bool("check", false, "fail if the output is out of date")
@@ -168,11 +172,15 @@ func (c *command) generate(args []string) int {
 		fmt.Fprintln(c.err, "--terraform cannot be combined with --service: infrastructure is shared by every service")
 		return exitUsage
 	}
+	if *permissions && *service != "" {
+		fmt.Fprintln(c.err, "--permissions cannot be combined with --service: the file covers every service")
+		return exitUsage
+	}
 	s, err := loadValid(*specPath)
 	if err != nil {
 		return c.fail(err)
 	}
-	if comps == (gen.Components{}) && !*terraform {
+	if comps == (gen.Components{}) && !*terraform && !*permissions {
 		comps = gen.DefaultComponents()
 	}
 	outputs := map[string][]byte{}
@@ -195,6 +203,13 @@ func (c *command) generate(args []string) int {
 			return c.fail(err)
 		}
 		addOutputs(outputs, *tfDir, files)
+	}
+	if *permissions {
+		files, err := gen.Permissions(s)
+		if err != nil {
+			return c.fail(err)
+		}
+		addOutputs(outputs, *permsDir, files)
 	}
 	if *check {
 		return c.checkOutputs(outputs)
