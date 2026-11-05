@@ -153,6 +153,9 @@ func bucketConfig(name string, k KVBucket) jetstream.KeyValueConfig {
 	}
 }
 
+// placement leaves out Preferred, which nats.go has no field for. Terraform sets
+// it on streams and reports it as unsupported on buckets, so only devnats misses
+// it. Verify does not compare placement.
 func placement(p *Placement) *jetstream.Placement {
 	if p == nil {
 		return nil

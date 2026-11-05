@@ -446,6 +446,11 @@ func (s Subject) Wildcard() string {
 	return strings.Join(out, ".")
 }
 
+// HasWildcard reports whether the subject holds a NATS wildcard.
+func (s Subject) HasWildcard() bool {
+	return slices.Contains(s.tokens, "*") || slices.Contains(s.tokens, ">")
+}
+
 // Tokens returns the raw subject tokens.
 func (s Subject) Tokens() []string { return s.tokens }
 

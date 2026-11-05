@@ -35,8 +35,10 @@ mutate:
 generate:
 	go run ./cmd/gonuts generate --spec examples/shop/nuts.yaml --out examples/shop/gen
 	go run ./cmd/gonuts generate --spec examples/shop/nuts.yaml --terraform --terraform-out examples/shop/terraform
+	go run ./cmd/gonuts generate --spec examples/shop/nuts.yaml --permissions --permissions-out examples/shop/permissions
 
 # Everything CI requires before merge.
 check: build lint test-race
 	go run ./cmd/gonuts generate --check --spec examples/shop/nuts.yaml --out examples/shop/gen
 	go run ./cmd/gonuts generate --check --spec examples/shop/nuts.yaml --terraform --terraform-out examples/shop/terraform
+	go run ./cmd/gonuts generate --check --spec examples/shop/nuts.yaml --permissions --permissions-out examples/shop/permissions

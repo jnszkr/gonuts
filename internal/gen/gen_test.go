@@ -453,6 +453,11 @@ func TestServiceInfraIncludesItsPublishStream(t *testing.T) {
 // combination is proven to compile on its own.
 func compile(t *testing.T, opts Options) {
 	t.Helper()
+	compileSpec(t, shop(t), opts)
+}
+
+func compileSpec(t *testing.T, s *spec.Spec, opts Options) {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -475,7 +480,7 @@ func compile(t *testing.T, opts Options) {
 		t.Fatal(err)
 	}
 	opts.ImportPath = "example.com/app/gen"
-	files, err := Go(shop(t), opts)
+	files, err := Go(s, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,4 +524,23 @@ func TestEveryCombinationCompiles(t *testing.T) {
 			compile(t, opts)
 		})
 	}
+}
+
+func TestSubjectParamsNamedLikeGeneratedIdentifiersCompile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	s := shop(t)
+	for _, param := range []string{"e", "b", "c", "s", "nuts", "models", "jetstream", "context", "time"} {
+		s.Events["core."+param] = spec.Event{Subject: "core." + param + ".{" + param + "}", Model: "Order"}
+		s.Events["stored."+param] = spec.Event{Subject: "stored." + param + ".{" + param + "}", Model: "Order"}
+		x := s.Streams["ORDERS"]
+		x.Events = append(x.Events, "stored."+param)
+		s.Streams["ORDERS"] = x
+		s.KV["kv_"+param] = spec.KVBucket{Key: "{" + param + "}", Model: "Cart"}
+	}
+	if err := spec.Join(spec.Validate(s)); err != nil {
+		t.Fatal(err)
+	}
+	compileSpec(t, s, Options{Components: DefaultComponents()})
 }

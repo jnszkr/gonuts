@@ -90,10 +90,12 @@ With no component flag, `gonuts generate` writes all the Go code and no Terrafor
 | `--rr-client` | Request functions |
 | `--rr-server` | Handler interfaces and server wiring |
 | `--terraform` | Streams, consumers and buckets for the NATS JetStream provider |
+| `--permissions` | NATS server permissions for each service |
 
 ```bash
 gonuts generate --rr-client --models
 gonuts generate --terraform --terraform-out ./infra/nats
+gonuts generate --permissions --permissions-out ./infra/nats
 gonuts generate --service billing
 ```
 
@@ -151,6 +153,24 @@ Servers use the `nats.go` micro framework, so they get discovery, stats and queu
 
 Pass `nuts.WithVerify(nuts.VerifyFail)` to stop at startup if the server differs from the spec, or `nuts.VerifyWarn` to log the differences. Both only read. For tests and local development, `nuts/devnats` creates everything.
 
+**The server can enforce the spec.** `gonuts generate --permissions` turns the `services` block into a server config file with one variable per service. Each one allows what that service declares and nothing else, so it cannot publish an event it does not own, write to a bucket it only reads, or create or delete a stream. Users and credentials stay in your own server config:
+
+```
+include "permissions.conf"
+
+authorization {
+  users: [
+    { user: billing, password: $BILLING_PASSWORD, permissions: $BILLING_PERMISSIONS }
+  ]
+}
+```
+
+Generate the code with `--service` as well, so a service only holds the calls it is allowed to make. Terraform and `gonuts schedules sync` need their own user with wider access. Three things to know:
+
+- Watching a bucket is an ephemeral consumer, so read access can create and delete consumers on that bucket's own stream.
+- Replies use the shared `_INBOX.>` prefix. To keep services from reading each other's replies, give each one a prefix with `nats.CustomInboxPrefix` and tighten its permissions to match.
+- While an old and a new version run side by side, grant what both need. `gonuts diff` flags a changed service for this reason.
+
 **Plugins wrap every generated call**, so tracing and metrics need no helper code.
 
 ```go
@@ -177,7 +197,6 @@ Each call exposes its kind, YAML name, subject, service and headers. Trace conte
 ## Not here yet
 
 - Published OpenTelemetry and Datadog plugins
-- Generated NATS permissions
 - MQTT and other server-level protocol settings
 - Generated Go for object stores
 - Encodings other than JSON

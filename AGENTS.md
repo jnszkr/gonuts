@@ -13,12 +13,12 @@ Instructions for AI coding agents working on gonuts. Humans are welcome too.
 | `cmd/gonuts` | Program entry point |
 | `internal/cli` | Commands and flags |
 | `internal/spec` | YAML parsing, validation, spec-to-NATS config mapping |
-| `internal/gen` | Go generators (`code.go`), scoping (`scope.go`), Terraform (`terraform.go`) |
+| `internal/gen` | Go generators (`code.go`), scoping (`scope.go`), Terraform (`terraform.go`), server permissions (`permissions.go`) |
 | `internal/diff` | Classifies spec changes for blue-green deployments |
 | `internal/natstest` | Starts a real JetStream server for tests |
 | `nuts` | Runtime imported by generated code; public API |
 | `nuts/devnats` | Creates infrastructure for tests and local development only |
-| `examples/shop` | Example spec, its generated output and end-to-end tests |
+| `examples/shop` | Example spec, its generated output and end-to-end tests, including permissions on a real server |
 
 ## Commands
 
@@ -38,11 +38,13 @@ Before calling work done, run `make check`.
 
 1. **Write the test first and watch it fail.** This covers features and bug fixes. Prefer a real server from `internal/natstest` over mocks.
 2. **Applications never change infrastructure.** Generated code and `nuts` only bind to streams, consumers and buckets. Only `nuts/devnats` and Terraform create them.
-3. **Never edit generated files.** Anything under `examples/shop/gen` or `examples/shop/terraform` comes from `make generate`. Change the generator and regenerate.
+3. **Never edit generated files.** Anything under `examples/shop/gen`, `examples/shop/terraform` or `examples/shop/permissions` comes from `make generate`. Change the generator and regenerate.
 4. **Every generator change needs a compile check.** `TestEveryCombinationCompiles` builds each flag combination; add a case for a new flag.
 5. **Secrets never go in the YAML or generated output.**
 6. **Output must be deterministic.** Iterate maps through `spec.SortedKeys`.
 7. **Never drop a setting silently.** If Terraform cannot express a field, generation stops with an error.
+8. **A valid spec must generate working code.** If a spec passes `gonuts validate` but its output does not compile or cannot work on a server, that is a validator bug.
+9. **Runtime changes can need new permissions.** If generated code or `nuts` starts using another NATS subject, add it to `internal/gen/permissions.go` and cover it in `examples/shop/permissions_test.go`.
 
 ## Adding a NATS setting
 

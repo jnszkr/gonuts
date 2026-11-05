@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,61 @@ func TestGenerateTerraformDefaultFolder(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "terraform", "streams.tf")); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestGeneratePermissionsOnlyWritesPermissions(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "gen")
+	perms := filepath.Join(dir, "auth")
+	args := genArgs(t, out, "--permissions", "--permissions-out", perms)
+	if code, _, errOut := run(args...); code != 0 {
+		t.Fatalf("code %d: %s", code, errOut)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("Go was generated")
+	}
+	if files := listFiles(t, perms); len(files) != 1 || files[0] != "permissions.conf" {
+		t.Errorf("files = %v", files)
+	}
+	if code, _, errOut := run(append(args, "--check")...); code != 0 {
+		t.Fatalf("check: code %d: %s", code, errOut)
+	}
+	if err := os.WriteFile(filepath.Join(perms, "permissions.conf"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := run(append(args, "--check")...); code != 1 {
+		t.Fatalf("stale check: code %d", code)
+	}
+}
+
+func TestGeneratePermissionsDefaultFolder(t *testing.T) {
+	shop := shopPath(t)
+	t.Chdir(t.TempDir())
+	if code, _, errOut := run("generate", "--spec", shop, "--permissions"); code != 0 {
+		t.Fatalf("code %d: %s", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join("permissions", "permissions.conf")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerateRejectsPermissionsWithService(t *testing.T) {
+	code, _, errOut := run(genArgs(t, t.TempDir(), "--permissions", "--service", "billing")...)
+	if code != 2 || !strings.Contains(errOut, "--service") {
+		t.Fatalf("code %d: %s", code, errOut)
+	}
+}
+
+func TestGeneratePermissionsNeedsServices(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nuts.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nname: x\ngo: {package: x}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := run("generate", "--spec", path, "--permissions", "--permissions-out", dir)
+	if code != 1 || !strings.Contains(errOut, "no services") {
+		t.Fatalf("code %d: %s", code, errOut)
 	}
 }
 
@@ -437,10 +493,34 @@ func TestUsageAndVersion(t *testing.T) {
 	if code, _, _ := run("nope"); code != 2 {
 		t.Fatalf("unknown: code %d", code)
 	}
-	if code, out, _ := run("help"); code != 0 || !strings.Contains(out, "--rr-client") {
+	if code, out, _ := run("help"); code != 0 || !strings.Contains(out, "--rr-client") || !strings.Contains(out, "--permissions") {
 		t.Fatalf("help: code %d: %s", code, out)
 	}
 	if code, out, _ := run("version"); code != 0 || out == "" {
 		t.Fatalf("version: code %d: %q", code, out)
+	}
+}
+
+func TestVersionComesFromTheBuild(t *testing.T) {
+	info := func(v string) *debug.BuildInfo {
+		return &debug.BuildInfo{Main: debug.Module{Version: v}}
+	}
+	cases := []struct {
+		name, set string
+		build     *debug.BuildInfo
+		want      string
+	}{
+		{"set at build time wins", "v1.0.0", info("v2.0.0"), "v1.0.0"},
+		{"go install", "dev", info("v2.0.0"), "v2.0.0"},
+		{"local build", "dev", info("(devel)"), "dev"},
+		{"no module version", "dev", info(""), "dev"},
+		{"no build info", "dev", nil, "dev"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveVersion(c.set, c.build); got != c.want {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+		})
 	}
 }

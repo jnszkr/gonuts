@@ -142,6 +142,9 @@ func Terraform(s *spec.Spec) (map[string][]byte, error) {
 
 func unsupportedBucket(name string, k spec.KVBucket) []string {
 	var out []string
+	if k.Placement != nil && k.Placement.Preferred != "" {
+		out = append(out, "kv."+name+".placement.preferred")
+	}
 	if k.RePublish != nil {
 		out = append(out, "kv."+name+".republish")
 	}

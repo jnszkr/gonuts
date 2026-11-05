@@ -45,6 +45,7 @@ func (c *comparer) add(sev Severity, path, format string, args ...any) {
 // Compare lists the differences between two specs, most severe first.
 func Compare(oldSpec, newSpec *spec.Spec) []Change {
 	c := &comparer{}
+	c.header(oldSpec, newSpec)
 	c.models(oldSpec, newSpec)
 	c.events(oldSpec, newSpec)
 	c.streams(oldSpec, newSpec)
@@ -52,6 +53,7 @@ func Compare(oldSpec, newSpec *spec.Spec) []Change {
 	c.buckets(oldSpec, newSpec)
 	c.schedules(oldSpec, newSpec)
 	c.requests(oldSpec, newSpec)
+	c.services(oldSpec, newSpec)
 	slices.SortStableFunc(c.changes, func(a, b Change) int {
 		if d := severityOrder[a.Severity] - severityOrder[b.Severity]; d != 0 {
 			return d
@@ -84,8 +86,20 @@ func membership[V any](c *comparer, prefix string, before, after map[string]V, r
 	}
 }
 
+func (c *comparer) header(before, after *spec.Spec) {
+	if before.Name != after.Name {
+		c.add(Safe, "name", "changed from %s to %s", before.Name, after.Name)
+	}
+	if before.Go.Package != after.Go.Package {
+		c.add(Safe, "go.package", "changed from %s to %s; update imports", before.Go.Package, after.Go.Package)
+	}
+}
+
 func (c *comparer) models(before, after *spec.Spec) {
 	membership(c, "models", before.Models, after.Models, NeedsBoth, "old services may still use it", func(path string, a, b *spec.Model) {
+		if a.Description != b.Description {
+			c.add(Safe, path+".description", "changed")
+		}
 		for _, f := range a.Fields {
 			n := field(b, f.Name)
 			if n == nil {
@@ -99,6 +113,9 @@ func (c *comparer) models(before, after *spec.Spec) {
 				c.add(NeedsBoth, path+"."+f.Name, "now required; old publishers may omit it")
 			case !f.Optional && n.Optional:
 				c.add(Safe, path+"."+f.Name, "now optional; check old readers handle it missing")
+			}
+			if f.Description != n.Description {
+				c.add(Safe, path+"."+f.Name, "description changed")
 			}
 		}
 		for _, f := range b.Fields {
@@ -131,6 +148,9 @@ func (c *comparer) events(before, after *spec.Spec) {
 		if a.Model != b.Model {
 			c.add(Destructive, path+".model", "model changed from %s to %s; stored messages keep the old shape", a.Model, b.Model)
 		}
+		if a.Description != b.Description {
+			c.add(Safe, path+".description", "changed")
+		}
 	})
 }
 
@@ -146,6 +166,11 @@ func (c *comparer) streams(before, after *spec.Spec) {
 		for _, subject := range before.StreamSubjects(name) {
 			if !slices.Contains(after.StreamSubjects(name), subject) {
 				c.add(NeedsBoth, path+".subjects", "%s removed; old publishers would fail", subject)
+			}
+		}
+		for _, subject := range after.StreamSubjects(name) {
+			if !slices.Contains(before.StreamSubjects(name), subject) {
+				c.add(Safe, path+".subjects", "%s added", subject)
 			}
 		}
 		if !a.AllowMsgSchedules && b.AllowMsgSchedules {
@@ -211,6 +236,12 @@ func (c *comparer) schedules(before, after *spec.Spec) {
 
 func (c *comparer) requests(before, after *spec.Spec) {
 	membership(c, "requests", before.Requests, after.Requests, NeedsBoth, "old clients may still call it", func(path string, a, b spec.RequestGroup) {
+		if a.QueueGroup != b.QueueGroup {
+			c.add(NeedsBoth, path+".queue_group", "while both versions run, both answer every request")
+		}
+		if a.Timeout != b.Timeout || a.Version != b.Version {
+			c.add(Safe, path, "settings changed")
+		}
 		membership(c, path, a.Endpoints, b.Endpoints, NeedsBoth, "old clients may still call it", func(path string, x, y spec.Endpoint) {
 			if x.Subject != y.Subject {
 				c.add(Destructive, path+".subject", "subject changed; old clients get no responder")
@@ -221,6 +252,24 @@ func (c *comparer) requests(before, after *spec.Spec) {
 			if x.Reply != y.Reply {
 				c.add(Destructive, path+".reply", "reply model changed; old clients expect the old shape")
 			}
+			for _, code := range y.Errors {
+				if !slices.Contains(x.Errors, code) {
+					c.add(NeedsBoth, path+".errors", "%s added; old clients see it as an undeclared error", code)
+				}
+			}
+			for _, code := range x.Errors {
+				if !slices.Contains(y.Errors, code) {
+					c.add(Safe, path+".errors", "%s removed", code)
+				}
+			}
 		})
+	})
+}
+
+func (c *comparer) services(before, after *spec.Spec) {
+	membership(c, "services", before.Services, after.Services, Safe, "nothing on the server depends on it", func(path string, a, b spec.Service) {
+		if !reflect.DeepEqual(a, b) {
+			c.add(NeedsBoth, path, "what it does changed; old versions need their old permissions until they stop")
+		}
 	})
 }

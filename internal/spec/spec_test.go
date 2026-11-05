@@ -282,6 +282,83 @@ func TestValidateReportsMistakes(t *testing.T) {
 			x.Serves = []string{"nope"}
 			s.Services["orders-api"] = x
 		}, "services.orders-api.serves", "unknown request group"},
+		{"model name", func(s *Spec) { s.Models["my-model"] = &Model{} }, "models.my-model", "exported Go identifier"},
+		{"unexported model", func(s *Spec) { s.Models["order"] = &Model{} }, "models.order", "exported Go identifier"},
+		{"field name", func(s *Spec) { s.Models["Cart"].Fields[0].Name = "1a" }, "models.Cart.fields.1a", "Go identifier"},
+		{"field names clash", func(s *Spec) {
+			m := s.Models["Order"]
+			m.Fields = append(m.Fields, &Field{Name: "ID", Type: "string"})
+		}, "models.Order.fields.ID", "same Go name"},
+		{"recursive model", func(s *Spec) {
+			s.Models["R"] = &Model{Fields: []*Field{{Name: "r", Type: "R"}}}
+		}, "models.R", "contains itself"},
+		{"indirectly recursive model", func(s *Spec) {
+			s.Models["A"] = &Model{Fields: []*Field{{Name: "b", Type: "B"}}}
+			s.Models["B"] = &Model{Fields: []*Field{{Name: "a", Type: "A"}}}
+		}, "models.B", "contains itself"},
+		{"event wildcard", func(s *Spec) { e := s.Events["cart.sweep"]; e.Subject = "z.*"; s.Events["cart.sweep"] = e }, "events.cart.sweep.subject", "wildcard"},
+		{"event names clash", func(s *Spec) { s.Events["cart_sweep"] = Event{Subject: "z.z", Model: "Order"} }, "events.cart_sweep", "same Go name"},
+		{"event name", func(s *Spec) { s.Events["1a"] = Event{Subject: "z.z", Model: "Order"} }, "events.1a", "Go identifier"},
+		{"params clash", func(s *Spec) {
+			e := s.Events["cart.sweep"]
+			e.Subject = "z.{a_b}.{a__b}"
+			s.Events["cart.sweep"] = e
+		}, "events.cart.sweep.subject", "same Go name"},
+		{"blank param", func(s *Spec) { e := s.Events["cart.sweep"]; e.Subject = "z.{_}"; s.Events["cart.sweep"] = e }, "events.cart.sweep.subject", "Go name"},
+		{"kv wildcard", func(s *Spec) { k := s.KV["carts"]; k.Key = "{user_id}.>"; s.KV["carts"] = k }, "kv.carts.key", "wildcard"},
+		{"kv params clash", func(s *Spec) { k := s.KV["carts"]; k.Key = "{a_b}.{a__b}"; s.KV["carts"] = k }, "kv.carts.key", "same Go name"},
+		{"bucket name", func(s *Spec) { s.KV["a.b"] = KVBucket{Key: "{k}", Model: "Cart"} }, "kv.a.b", "letters"},
+		{"reserved bucket", func(s *Spec) { s.KV["new"] = KVBucket{Key: "{k}", Model: "Cart"} }, "kv.new", "reserved"},
+		{"bucket names clash", func(s *Spec) {
+			s.KV["my-b"] = KVBucket{Key: "{k}", Model: "Cart"}
+			s.KV["my_b"] = KVBucket{Key: "{k}", Model: "Cart"}
+		}, "kv.my_b", "same Go name"},
+		{"stream name", func(s *Spec) { s.Streams["A.B"] = Stream{Subjects: []string{"z"}} }, "streams.A.B", "must not contain"},
+		{"consumer name", func(s *Spec) { s.Consumers["a.b"] = Consumer{Stream: "ORDERS"} }, "consumers.a.b", "must not contain"},
+		{"reserved consumer", func(s *Spec) { s.Consumers["new"] = Consumer{Stream: "ORDERS"} }, "consumers.new", "reserved"},
+		{"consumer clashes with a handler", func(s *Spec) {
+			s.Consumers["billing-orders-handler"] = Consumer{Stream: "ORDERS", Events: []string{"order.placed"}}
+		}, "consumers.billing-orders-handler", "same Go name"},
+		{"group keyword", func(s *Spec) { s.Requests["type"] = RequestGroup{} }, "requests.type", "package"},
+		{"reserved group", func(s *Spec) { s.Requests["events"] = RequestGroup{} }, "requests.events", "reserved"},
+		{"group named after a method", func(s *Spec) { s.Requests["runtime"] = RequestGroup{} }, "requests.runtime", "reserved"},
+		{"groups share a package", func(s *Spec) {
+			s.Requests["my-api"] = RequestGroup{}
+			s.Requests["myapi"] = RequestGroup{}
+		}, "requests.myapi", "same package"},
+		{"unexported endpoint", func(s *Spec) {
+			s.Requests["orders"].Endpoints["get"] = Endpoint{Subject: "z.z", Request: "GetOrder", Reply: "Order"}
+		}, "requests.orders.endpoints.get", "exported Go identifier"},
+		{"unexported error", func(s *Spec) {
+			e := s.Requests["orders"].Endpoints["Get"]
+			e.Errors = []string{"notFound"}
+			s.Requests["orders"].Endpoints["Get"] = e
+		}, "requests.orders.endpoints.Get.errors", "exported Go identifier"},
+		{"endpoint params", func(s *Spec) {
+			e := s.Requests["orders"].Endpoints["Get"]
+			e.Subject = "orders.api.{id}"
+			s.Requests["orders"].Endpoints["Get"] = e
+		}, "requests.orders.endpoints.Get.subject", "parameters"},
+		{"endpoint wildcard", func(s *Spec) {
+			e := s.Requests["orders"].Endpoints["Get"]
+			e.Subject = "orders.api.*"
+			s.Requests["orders"].Endpoints["Get"] = e
+		}, "requests.orders.endpoints.Get.subject", "wildcard"},
+		{"schedule params", func(s *Spec) {
+			x := s.Schedules["nightly-cart-sweep"]
+			x.Subject = "carts.schedules.{id}"
+			s.Schedules["nightly-cart-sweep"] = x
+		}, "schedules.nightly-cart-sweep.subject", "parameters"},
+		{"schedule wildcard", func(s *Spec) {
+			x := s.Schedules["nightly-cart-sweep"]
+			x.Subject = "carts.schedules.*"
+			s.Schedules["nightly-cart-sweep"] = x
+		}, "schedules.nightly-cart-sweep.subject", "wildcard"},
+		{"delayed schedule subject not covered", func(s *Spec) {
+			st := s.Streams["CARTS"]
+			st.Subjects = []string{"carts.schedules.sweep"}
+			s.Streams["CARTS"] = st
+		}, "schedules.nightly-cart-sweep.subject", "not covered"},
 		{"service calls", func(s *Spec) {
 			x := s.Services["checkout"]
 			x.Calls = []string{"orders.Nope"}
@@ -314,6 +391,18 @@ func TestValidateAcceptsLimitValues(t *testing.T) {
 	sc := s.Schedules["nightly-cart-sweep"]
 	sc.Cron, sc.TimeZone, sc.Every = "", "", Duration{Duration: time.Second}
 	s.Schedules["nightly-cart-sweep"] = sc
+	if errs := Validate(s); len(errs) != 0 {
+		t.Fatalf("errors = %v", errs)
+	}
+}
+
+func TestValidateAcceptsRecursionThroughPointersAndCollections(t *testing.T) {
+	s := loadShop(t)
+	s.Models["Tree"] = &Model{Fields: []*Field{
+		{Name: "parent", Type: "Tree", Optional: true},
+		{Name: "children", Type: "[]Tree"},
+		{Name: "named", Type: "map[string]Tree"},
+	}}
 	if errs := Validate(s); len(errs) != 0 {
 		t.Fatalf("errors = %v", errs)
 	}
@@ -653,5 +742,18 @@ func TestInfraRoundTripsThroughJSON(t *testing.T) {
 	}
 	if got.Streams[1].MaxAge != want.Streams[1].MaxAge {
 		t.Fatalf("got %+v", got.Streams[1])
+	}
+}
+
+func TestBucketNames(t *testing.T) {
+	for _, good := range []string{"a", "z", "A", "Z", "0", "9", "my-bucket_1"} {
+		if !validBucketName(good) {
+			t.Errorf("%q rejected", good)
+		}
+	}
+	for _, bad := range []string{"", "`", "{", "@", "[", "/", ":", "a.b", "a b"} {
+		if validBucketName(bad) {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }

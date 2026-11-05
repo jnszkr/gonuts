@@ -693,6 +693,74 @@ func TestBucketWatch(t *testing.T) {
 	}
 }
 
+func TestBucketWatchPassesThroughPlugins(t *testing.T) {
+	rec := newRecorder("p")
+	rt := runtimeFor(t, nuts.WithPlugins(rec), nuts.WithService("svc"))
+	stop, err := bucket(t, rt).Watch(ctxFor(t), func(nuts.Entry[payload]) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.last) != 1 || rec.last[0].Kind != nuts.KindKV || rec.last[0].Service != "svc" || rec.last[0].Subject != ">" {
+		t.Fatalf("calls = %+v", rec.last)
+	}
+}
+
+func TestBucketWatchPluginCanStopIt(t *testing.T) {
+	boom := errors.New("boom")
+	rt := runtimeFor(t, nuts.WithPlugins(stopper{boom}))
+	if _, err := nuts.NewBucket[payload](rt, "any").Watch(ctxFor(t), func(nuts.Entry[payload]) {}); !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBucketWatchOutlivesAPluginContext(t *testing.T) {
+	rt := runtimeFor(t, nuts.WithPlugins(shortContext{}))
+	ctx := ctxFor(t)
+	b := bucket(t, rt)
+	got := make(chan nuts.Entry[payload], 4)
+	stop, err := b.Watch(ctx, func(e nuts.Entry[payload]) { got <- e })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	// A plugin may cancel the context it hands down as soon as the call returns.
+	raw, err := rt.JetStream().KeyValue(ctx, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := raw.Put(ctx, "k", []byte(`{"value":"later"}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case e := <-got:
+		if e.Value == nil || e.Value.Value != "later" {
+			t.Fatalf("entry = %+v", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch ended when the plugin's context did")
+	}
+}
+
+type stopper struct{ err error }
+
+func (s stopper) Wrap(nuts.Handler) nuts.Handler {
+	return func(context.Context, *nuts.Call) error { return s.err }
+}
+
+type shortContext struct{}
+
+func (shortContext) Wrap(next nuts.Handler) nuts.Handler {
+	return func(ctx context.Context, c *nuts.Call) error {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		return next(ctx, c)
+	}
+}
+
 func scheduleStream(t *testing.T, rt *nuts.Runtime) jetstream.Stream {
 	t.Helper()
 	ctx := ctxFor(t)

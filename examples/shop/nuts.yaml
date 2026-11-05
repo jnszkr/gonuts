@@ -114,3 +114,6 @@ services:
   billing:
     consumes: [billing-orders]
     publishes: [order.shipped]
+  cart-sweeper:
+    schedules: [nightly-cart-sweep]
+    kv: { carts: read }
