@@ -1,0 +1,522 @@
+package gen
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jnszkr/gonuts/internal/spec"
+)
+
+func shop(t *testing.T) *spec.Spec {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "examples", "shop", "nuts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := spec.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func generate(t *testing.T, opts Options) map[string]string {
+	t.Helper()
+	opts.ImportPath = "example.com/app/gen"
+	files, err := Go(shop(t), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for name, data := range files {
+		out[name] = string(data)
+	}
+	return out
+}
+
+func names(files map[string]string) []string {
+	return spec.SortedKeys(files)
+}
+
+func mustContain(t *testing.T, text string, wants ...string) {
+	t.Helper()
+	for _, w := range wants {
+		if !strings.Contains(text, w) {
+			t.Errorf("missing %q in:\n%s", w, text)
+		}
+	}
+}
+
+func mustNotContain(t *testing.T, text string, bad ...string) {
+	t.Helper()
+	for _, w := range bad {
+		if strings.Contains(text, w) {
+			t.Errorf("unexpected %q in:\n%s", w, text)
+		}
+	}
+}
+
+func TestGoName(t *testing.T) {
+	for in, want := range map[string]string{
+		"total_cents": "TotalCents", "id": "ID", "user_id": "UserID", "order.placed": "OrderPlaced",
+		"billing-orders": "BillingOrders", "sku": "SKU", "Get": "Get", "url": "URL", "OrderPlaced": "OrderPlaced", "a__b": "AB",
+	} {
+		if got := GoName(in); got != want {
+			t.Errorf("GoName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParamName(t *testing.T) {
+	for in, want := range map[string]string{"region": "region", "user_id": "userID", "sku": "sku", "id": "id", "type": "type_", "func": "func_"} {
+		if got := paramName(in); got != want {
+			t.Errorf("paramName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestGoType(t *testing.T) {
+	for in, want := range map[string]string{
+		"string": "string", "uuid": "string", "int64": "int64", "time": "time.Time", "duration": "time.Duration",
+		"bytes": "[]byte", "any": "any", "LineItem": "LineItem", "[]LineItem": "[]LineItem", "map[string]int": "map[string]int",
+		"[]map[string]uuid": "[]map[string]string", "bool": "bool", "float64": "float64",
+	} {
+		if got := goType(in); got != want {
+			t.Errorf("goType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDefaultGeneratesAllGoComponents(t *testing.T) {
+	want := []string{
+		"app.go", "client/orders/client.go", "consumers/consumers.go", "events/events.go", "kv/kv.go",
+		"models/models.go", "schedules/schedules.go", "server/orders/server.go",
+	}
+	if got := names(generate(t, Options{Components: DefaultComponents()})); !slices.Equal(got, want) {
+		t.Fatalf("files = %v, want %v", got, want)
+	}
+}
+
+func TestModelsFlagWritesOnlyModels(t *testing.T) {
+	got := names(generate(t, Options{Components: Components{Models: true}}))
+	if !slices.Equal(got, []string{"models/models.go"}) {
+		t.Fatalf("files = %v", got)
+	}
+}
+
+func TestNoComponentsWriteNothing(t *testing.T) {
+	if got := generate(t, Options{}); len(got) != 0 {
+		t.Fatalf("files = %v", names(got))
+	}
+}
+
+func TestComponentFlagsAreIndependent(t *testing.T) {
+	cases := []struct {
+		name string
+		c    Components
+		want string
+		not  []string
+	}{
+		{"client", Components{RRClient: true}, "client/orders/client.go", []string{"server/orders/server.go", "consumers/consumers.go"}},
+		{"server", Components{RRServer: true}, "server/orders/server.go", []string{"client/orders/client.go"}},
+		{"consumers", Components{Consumers: true}, "consumers/consumers.go", []string{"events/events.go"}},
+		{"pubsub", Components{PubSub: true}, "events/events.go", []string{"consumers/consumers.go"}},
+		{"kv", Components{KV: true}, "kv/kv.go", []string{"events/events.go"}},
+		{"schedules", Components{Schedules: true}, "schedules/schedules.go", []string{"kv/kv.go"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			files := generate(t, Options{Components: c.c})
+			if _, ok := files[c.want]; !ok {
+				t.Fatalf("missing %s in %v", c.want, names(files))
+			}
+			if _, ok := files["models/models.go"]; !ok {
+				t.Errorf("models were not pulled in: %v", names(files))
+			}
+			for _, n := range c.not {
+				if _, ok := files[n]; ok {
+					t.Errorf("unexpected %s", n)
+				}
+			}
+		})
+	}
+}
+
+func TestDependenciesOnlyIncludeModelsThatAreUsed(t *testing.T) {
+	m := generate(t, Options{Components: Components{KV: true}})["models/models.go"]
+	mustContain(t, m, "type Cart struct", "type LineItem struct")
+	mustNotContain(t, m, "type OrderPlaced struct", "type GetOrder struct")
+}
+
+func TestModelsFlagWithComponentKeepsAllModels(t *testing.T) {
+	m := generate(t, Options{Components: Components{KV: true, Models: true}})["models/models.go"]
+	mustContain(t, m, "type OrderPlaced struct")
+}
+
+func TestModelCode(t *testing.T) {
+	m := generate(t, Options{Components: Components{Models: true}})["models/models.go"]
+	mustContain(t, m,
+		"// Code generated by gonuts. DO NOT EDIT.",
+		"package models",
+		"// OrderPlaced: A customer completed checkout.",
+		"TotalCents int64",
+		"`json:\"total_cents\"`",
+		"Items",
+		"[]LineItem",
+		"Note",
+		"*string",
+		"`json:\"note,omitempty\"`",
+	)
+	mustNotContain(t, m, `"time"`)
+}
+
+func TestModelImportsTimeWhenNeeded(t *testing.T) {
+	s := shop(t)
+	s.Models["Order"].Fields[0].Type = "time"
+	files, err := Go(s, Options{Components: Components{Models: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, string(files["models/models.go"]), `"time"`, "time.Time")
+}
+
+func TestOptionalSlicesAreNotPointers(t *testing.T) {
+	s := shop(t)
+	s.Models["Order"].Fields[0] = &spec.Field{Name: "tags", Type: "[]string", Optional: true}
+	files, err := Go(s, Options{Components: Components{Models: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := string(files["models/models.go"])
+	mustContain(t, m, "Tags", "`json:\"tags,omitempty\"`")
+	mustNotContain(t, m, "*[]string")
+}
+
+func TestEventsCode(t *testing.T) {
+	e := generate(t, Options{Components: Components{PubSub: true}})["events/events.go"]
+	mustContain(t, e,
+		`"example.com/app/gen/models"`,
+		"func (e *Events) PublishOrderPlaced(ctx context.Context, region string, v models.OrderPlaced, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)",
+		`nuts.FormatSubject("orders.placed.%s", region)`,
+		`nuts.PublishStream(ctx, e.rt, "order.placed", subject, v, opts...)`,
+		"func (e *Events) PublishPriceChanged(ctx context.Context, sku string, v models.LineItem) error",
+		`nuts.PublishCore(ctx, e.rt, "price.changed", subject, v)`,
+		"func (e *Events) SubscribePriceChanged(ctx context.Context, h func(context.Context, PriceChangedMsg) error, opts ...nuts.SubOption) (stop func(), err error)",
+		`SKU string`,
+		`SKU: tokens[2]`,
+	)
+	mustNotContain(t, e, "SubscribeOrderPlaced")
+}
+
+func TestSubjectWithoutParamsIsAConstant(t *testing.T) {
+	e := generate(t, Options{Components: Components{PubSub: true}})["events/events.go"]
+	mustContain(t, e, `nuts.PublishStream(ctx, e.rt, "cart.sweep", "carts.sweep", v, opts...)`)
+	mustNotContain(t, e, `nuts.FormatSubject("carts.sweep"`)
+}
+
+func TestConsumersCode(t *testing.T) {
+	c := generate(t, Options{Components: Components{Consumers: true}})["consumers/consumers.go"]
+	mustContain(t, c,
+		"type OrderPlacedMsg = nuts.Msg[models.OrderPlaced, OrderPlacedParams]",
+		"Region string",
+		"Region: tokens[2]",
+		"type BillingOrdersHandler interface",
+		"OnOrderPlaced(ctx context.Context, m OrderPlacedMsg) error",
+		"type FulfillmentOrdersHandler interface",
+		"OnOrderShipped(ctx context.Context, m OrderShippedMsg) error",
+		"func (c *BillingOrders) Run(ctx context.Context, h BillingOrdersHandler) (stop func(), err error)",
+		`Stream: "ORDERS"`,
+		`Consumer: "billing-orders"`,
+		"30 * time.Second",
+		`nuts.NewRoute("order.placed", "orders.placed.*", OrderPlacedParamsFrom, h.OnOrderPlaced)`,
+	)
+}
+
+func TestPushConsumersGetNoHandler(t *testing.T) {
+	s := shop(t)
+	c := s.Consumers["billing-orders"]
+	c.DeliverSubject = "push.here"
+	s.Consumers["billing-orders"] = c
+	files, err := Go(s, Options{Components: Components{Consumers: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(files["consumers/consumers.go"])
+	mustNotContain(t, got, "BillingOrdersHandler")
+	mustContain(t, got, "FulfillmentOrdersHandler")
+}
+
+func TestKVCode(t *testing.T) {
+	k := generate(t, Options{Components: Components{KV: true}})["kv/kv.go"]
+	mustContain(t, k,
+		"func (b *Carts) Get(ctx context.Context, userID string) (*models.Cart, uint64, error)",
+		"func (b *Carts) Put(ctx context.Context, userID string, v models.Cart) (uint64, error)",
+		"func (b *Carts) Create(",
+		"func (b *Carts) Update(ctx context.Context, userID string, v models.Cart, revision uint64) (uint64, error)",
+		"func (b *Carts) Delete(",
+		"func (b *Carts) Watch(",
+		`nuts.NewBucket[models.Cart](rt, "carts")`,
+		`nuts.FormatSubject("%s", userID)`,
+	)
+}
+
+func TestReadOnlyServiceGetsNoKVWrites(t *testing.T) {
+	s := shop(t)
+	x := s.Services["checkout"]
+	x.KV = map[string]string{"carts": "read"}
+	s.Services["checkout"] = x
+	files, err := Go(s, Options{Components: Components{KV: true}, Service: "checkout", ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := string(files["kv/kv.go"])
+	mustContain(t, k, "func (b *Carts) Get(", "func (b *Carts) Watch(")
+	mustNotContain(t, k, "func (b *Carts) Put(", "func (b *Carts) Update(", "func (b *Carts) Delete(", "func (b *Carts) Create(")
+}
+
+func TestSchedulesCode(t *testing.T) {
+	x := generate(t, Options{Components: Components{Schedules: true}})["schedules/schedules.go"]
+	mustContain(t, x,
+		"func (s *Schedules) NightlyCartSweepAt(ctx context.Context, at time.Time, v models.CartSweep) error",
+		`nuts.ScheduleAt(ctx, s.rt, "nightly-cart-sweep", "carts.schedules.sweep", "carts.sweep", at, v)`,
+		"func (s *Schedules) Sync(ctx context.Context) error",
+		`Cron: "0 0 3 * * *"`,
+		`TimeZone: "Europe/Budapest"`,
+		`{"older_than":"24h"}`,
+	)
+}
+
+func TestClientCode(t *testing.T) {
+	c := generate(t, Options{Components: Components{RRClient: true}})["client/orders/client.go"]
+	mustContain(t, c,
+		"package orders",
+		"func (c *Client) Get(ctx context.Context, req models.GetOrder) (*models.Order, error)",
+		`nuts.Request[models.GetOrder, models.Order](ctx, c.rt, "orders.Get", "orders.api.get", 2*time.Second, req)`,
+		"type NotFoundError struct",
+		`func (e *NotFoundError) ReplyCode() string { return "NotFound" }`,
+		`func (e *NotFoundError) ReplyMessage() string { return e.Message }`,
+	)
+	mustNotContain(t, c, "/server/")
+}
+
+func TestServerCode(t *testing.T) {
+	c := generate(t, Options{Components: Components{RRServer: true}})["server/orders/server.go"]
+	mustContain(t, c,
+		"package orders",
+		"type Handler interface",
+		"Get(ctx context.Context, req models.GetOrder) (*models.Order, error)",
+		"func Serve(ctx context.Context, rt *nuts.Runtime, h Handler) (*nuts.Server, error)",
+		`Name: "orders"`,
+		`QueueGroup: "orders"`,
+		`nuts.AddEndpoint(srv, "Get", "orders.api.get", h.Get)`,
+		"type NotFoundError struct",
+	)
+	mustNotContain(t, c, "/client/")
+}
+
+func TestAppIncludesOnlyGeneratedComponents(t *testing.T) {
+	a := generate(t, Options{Components: Components{PubSub: true, RRClient: true}})["app.go"]
+	mustContain(t, a, "package shopnats", "Events *events.Events", "Orders *orders.Client", "func Connect(", "func Infra() nuts.Infra", "Check(ctx, Infra())")
+	mustNotContain(t, a, "consumers.New", "kv.New", "schedules.New")
+}
+
+func TestServiceScopeOnlyIncludesWhatItUses(t *testing.T) {
+	files := generate(t, Options{Components: DefaultComponents(), Service: "billing"})
+	if got := names(files); !slices.Equal(got, []string{"app.go", "consumers/consumers.go", "events/events.go", "models/models.go"}) {
+		t.Fatalf("files = %v", got)
+	}
+	mustContain(t, files["consumers/consumers.go"], "BillingOrdersHandler")
+	mustNotContain(t, files["consumers/consumers.go"], "FulfillmentOrders")
+	mustContain(t, files["events/events.go"], "PublishOrderShipped")
+	mustNotContain(t, files["events/events.go"], "PublishOrderPlaced(", "PublishPriceChanged")
+	mustContain(t, files["models/models.go"], "type OrderPlaced struct", "type OrderShipped struct")
+	mustNotContain(t, files["models/models.go"], "type Cart struct", "type GetOrder struct")
+	mustContain(t, files["app.go"], `billing-orders`)
+	mustNotContain(t, files["app.go"], `fulfillment-orders`, `"CARTS"`)
+}
+
+func TestServiceScopeForClientAndServer(t *testing.T) {
+	checkout := generate(t, Options{Components: DefaultComponents(), Service: "checkout"})
+	if _, ok := checkout["client/orders/client.go"]; !ok {
+		t.Errorf("checkout has no client: %v", names(checkout))
+	}
+	if _, ok := checkout["server/orders/server.go"]; ok {
+		t.Error("checkout should not serve orders")
+	}
+	mustContain(t, checkout["events/events.go"], "SubscribePriceChanged", "PublishOrderPlaced")
+	api := generate(t, Options{Components: DefaultComponents(), Service: "orders-api"})
+	if _, ok := api["server/orders/server.go"]; !ok {
+		t.Errorf("orders-api has no server: %v", names(api))
+	}
+	if _, ok := api["client/orders/client.go"]; ok {
+		t.Error("orders-api should not have a client")
+	}
+}
+
+func TestUnknownServiceIsAnError(t *testing.T) {
+	if _, err := Go(shop(t), Options{Components: DefaultComponents(), Service: "nope", ImportPath: "x"}); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestOutputIsDeterministic(t *testing.T) {
+	a := generate(t, Options{Components: DefaultComponents()})
+	for range 5 {
+		b := generate(t, Options{Components: DefaultComponents()})
+		for name := range a {
+			if a[name] != b[name] {
+				t.Fatalf("%s changed between runs", name)
+			}
+		}
+	}
+}
+
+func TestFieldDescriptionBecomesAComment(t *testing.T) {
+	s := shop(t)
+	s.Models["Order"].Fields[0].Description = "The order's   identifier."
+	files, err := Go(s, Options{Components: Components{Models: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, string(files["models/models.go"]), "// The order's identifier.")
+}
+
+func TestScheduleWithoutTimingIsNotSynced(t *testing.T) {
+	s := shop(t)
+	x := s.Schedules["nightly-cart-sweep"]
+	x.Cron, x.TimeZone = "", ""
+	s.Schedules["nightly-cart-sweep"] = x
+	files, err := Go(s, Options{Components: Components{Schedules: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(files["schedules/schedules.go"])
+	mustContain(t, got, "NightlyCartSweepAt(")
+	mustNotContain(t, got, "Subject: \"carts.schedules.sweep\"")
+}
+
+func TestScheduleEveryIsGenerated(t *testing.T) {
+	s := shop(t)
+	x := s.Schedules["nightly-cart-sweep"]
+	x.Cron, x.TimeZone, x.Every = "", "", spec.Duration{Duration: time.Minute}
+	s.Schedules["nightly-cart-sweep"] = x
+	files, err := Go(s, Options{Components: Components{Schedules: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(files["schedules/schedules.go"])
+	mustContain(t, got, "Every: 1 * time.Minute")
+	mustNotContain(t, got, "Cron:")
+}
+
+func TestRequestTimeoutDefaultsWhenTheSpecSetsNone(t *testing.T) {
+	s := shop(t)
+	g := s.Requests["orders"]
+	g.Timeout = spec.Duration{}
+	s.Requests["orders"] = g
+	files, err := Go(s, Options{Components: Components{RRClient: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, string(files["client/orders/client.go"]), "5*time.Second")
+}
+
+func TestEndpointWithoutErrorsHasNoErrorMapping(t *testing.T) {
+	s := shop(t)
+	e := s.Requests["orders"].Endpoints["Get"]
+	e.Errors = nil
+	s.Requests["orders"].Endpoints["Get"] = e
+	files, err := Go(s, Options{Components: Components{RRClient: true}, ImportPath: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(files["client/orders/client.go"])
+	mustContain(t, got, "return resp, err")
+	mustNotContain(t, got, "declaredError", `"errors"`)
+}
+
+func TestConnectNamesTheServiceOnlyWhenScoped(t *testing.T) {
+	mustContain(t, generate(t, Options{Components: DefaultComponents(), Service: "billing"})["app.go"], `nuts.WithService("billing")`)
+	mustNotContain(t, generate(t, Options{Components: DefaultComponents()})["app.go"], "nuts.WithService(")
+}
+
+func TestServiceInfraIncludesItsPublishStream(t *testing.T) {
+	mustContain(t, generate(t, Options{Components: DefaultComponents(), Service: "checkout"})["app.go"], `"name": "ORDERS"`)
+}
+
+// compile writes generated code into a throwaway module and builds it, so every
+// combination is proven to compile on its own.
+func compile(t *testing.T, opts Options) {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mod := strings.Replace(string(goMod), "module github.com/jnszkr/gonuts", "module example.com/app", 1)
+	mod += "\nrequire github.com/jnszkr/gonuts v0.0.0\nreplace github.com/jnszkr/gonuts => " + root + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := os.ReadFile(filepath.Join(root, "go.sum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.sum"), sum, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts.ImportPath = "example.com/app/gen"
+	files, err := Go(shop(t), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range files {
+		path := filepath.Join(dir, "gen", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("go", "vet", "-mod=mod", "./...")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOFLAGS=", "GOPROXY=off", "GONOSUMDB=*", "GOFLAGS=-mod=mod")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generated code does not compile: %v\n%s", err, out)
+	}
+}
+
+func TestEveryCombinationCompiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	cases := map[string]Options{
+		"default":    {Components: DefaultComponents()},
+		"models":     {Components: Components{Models: true}},
+		"pubsub":     {Components: Components{PubSub: true}},
+		"consumers":  {Components: Components{Consumers: true}},
+		"kv":         {Components: Components{KV: true}},
+		"schedules":  {Components: Components{Schedules: true}},
+		"client":     {Components: Components{RRClient: true}},
+		"server":     {Components: Components{RRServer: true}},
+		"billing":    {Components: DefaultComponents(), Service: "billing"},
+		"checkout":   {Components: DefaultComponents(), Service: "checkout"},
+		"orders-api": {Components: DefaultComponents(), Service: "orders-api"},
+	}
+	for name, opts := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			compile(t, opts)
+		})
+	}
+}
