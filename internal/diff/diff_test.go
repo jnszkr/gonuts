@@ -126,6 +126,52 @@ func TestCompareClassifiesChanges(t *testing.T) {
 			s.Requests["orders"].Endpoints["Get"] = e
 		}, "requests.orders.Get.reply", Destructive, "reply"},
 		{"group added", func(s *spec.Spec) { s.Requests["n"] = spec.RequestGroup{} }, "requests.n", Safe, "added"},
+		{"group queue", func(s *spec.Spec) {
+			g := s.Requests["orders"]
+			g.QueueGroup = "other"
+			s.Requests["orders"] = g
+		}, "requests.orders.queue_group", NeedsBoth, "both"},
+		{"group timeout", func(s *spec.Spec) {
+			g := s.Requests["orders"]
+			g.Timeout = spec.Duration{Duration: time.Minute}
+			s.Requests["orders"] = g
+		}, "requests.orders", Safe, "settings changed"},
+		{"group version", func(s *spec.Spec) {
+			g := s.Requests["orders"]
+			g.Version = "2.0.0"
+			s.Requests["orders"] = g
+		}, "requests.orders", Safe, "settings changed"},
+		{"endpoint error added", func(s *spec.Spec) {
+			e := s.Requests["orders"].Endpoints["Get"]
+			e.Errors = append(e.Errors, "Gone")
+			s.Requests["orders"].Endpoints["Get"] = e
+		}, "requests.orders.Get.errors", NeedsBoth, "Gone"},
+		{"endpoint error removed", func(s *spec.Spec) {
+			e := s.Requests["orders"].Endpoints["Get"]
+			e.Errors = nil
+			s.Requests["orders"].Endpoints["Get"] = e
+		}, "requests.orders.Get.errors", Safe, "NotFound"},
+		{"stream subject added", func(s *spec.Spec) {
+			x := s.Streams["CARTS"]
+			x.Subjects = append(x.Subjects, "more.>")
+			s.Streams["CARTS"] = x
+		}, "streams.CARTS.subjects", Safe, "more.> added"},
+		{"model description", func(s *spec.Spec) { s.Models["Cart"].Description = "x" }, "models.Cart.description", Safe, "changed"},
+		{"field description", func(s *spec.Spec) { s.Models["Cart"].Fields[0].Description = "x" }, "models.Cart.items", Safe, "description"},
+		{"event description", func(s *spec.Spec) {
+			e := s.Events["price.changed"]
+			e.Description = "x"
+			s.Events["price.changed"] = e
+		}, "events.price.changed.description", Safe, "changed"},
+		{"service added", func(s *spec.Spec) { s.Services["n"] = spec.Service{} }, "services.n", Safe, "added"},
+		{"service removed", func(s *spec.Spec) { delete(s.Services, "billing") }, "services.billing", Safe, "removed"},
+		{"service changed", func(s *spec.Spec) {
+			x := s.Services["billing"]
+			x.Publishes = nil
+			s.Services["billing"] = x
+		}, "services.billing", NeedsBoth, "permissions"},
+		{"package", func(s *spec.Spec) { s.Go.Package = "other" }, "go.package", Safe, "changed"},
+		{"name", func(s *spec.Spec) { s.Name = "other" }, "name", Safe, "changed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
