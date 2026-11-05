@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/jnszkr/gonuts/internal/spec"
 )
@@ -101,35 +99,19 @@ func (g *generator) write(path, pkg string, imports []string, body string) error
 	return nil
 }
 
-var initialisms = map[string]bool{
-	"id": true, "url": true, "uri": true, "sku": true, "uuid": true, "api": true, "http": true, "https": true,
-	"ttl": true, "json": true, "ip": true, "sql": true, "tls": true, "nats": true, "kv": true, "dns": true,
-}
-
-func splitName(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool { return r == '_' || r == '.' || r == '-' })
-}
-
 // GoName converts a YAML name into an exported Go identifier.
-func GoName(s string) string {
-	var b strings.Builder
-	for _, part := range splitName(s) {
-		if initialisms[part] {
-			b.WriteString(strings.ToUpper(part))
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(part)
-		b.WriteRune(unicode.ToUpper(r))
-		b.WriteString(part[size:])
-	}
-	return b.String()
-}
+func GoName(s string) string { return spec.GoName(s) }
 
-var reservedParams = map[string]bool{"ctx": true, "v": true, "h": true, "opts": true, "subject": true, "err": true, "revision": true, "fn": true, "at": true}
+// reservedParams are names generated functions already use: their arguments,
+// the receivers e and b, and the nuts package that their bodies call.
+var reservedParams = map[string]bool{
+	"ctx": true, "v": true, "h": true, "opts": true, "subject": true, "err": true, "revision": true, "fn": true, "at": true,
+	"e": true, "b": true, "nuts": true,
+}
 
 // paramName converts a YAML name into an unexported Go parameter name.
 func paramName(s string) string {
-	parts := splitName(s)
+	parts := spec.SplitName(s)
 	name := strings.ToLower(parts[0])
 	for _, p := range parts[1:] {
 		name += GoName(p)
@@ -140,9 +122,7 @@ func paramName(s string) string {
 	return name
 }
 
-func packageName(s string) string {
-	return strings.ToLower(strings.Join(splitName(s), ""))
-}
+func packageName(s string) string { return spec.PackageName(s) }
 
 var goTypes = map[string]string{"uuid": "string", "time": "time.Time", "duration": "time.Duration", "bytes": "[]byte"}
 

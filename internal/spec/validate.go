@@ -35,6 +35,7 @@ func Validate(s *Spec) []Error {
 	v.schedules()
 	v.requests()
 	v.services()
+	v.goNames()
 	slices.SortStableFunc(v.errs, func(a, b Error) int { return strings.Compare(a.Path, b.Path) })
 	return v.errs
 }
@@ -56,11 +57,93 @@ func (v *validator) header() {
 
 func (v *validator) models() {
 	for _, name := range SortedKeys(v.s.Models) {
+		path := "models." + name
+		if !exportedIdent(name) {
+			v.addf(path, "name must be an exported Go identifier")
+		}
+		if v.containsItself(name) {
+			v.addf(path, "contains itself, so it has no Go type; make the field optional or a list")
+		}
+		seen := map[string]string{}
 		for _, f := range v.s.Models[name].Fields {
+			fieldPath := path + ".fields." + f.Name
 			if !v.knownType(f.Type) {
-				v.addf("models."+name+".fields."+f.Name, "unknown type %q", f.Type)
+				v.addf(fieldPath, "unknown type %q", f.Type)
+			}
+			goName := GoName(f.Name)
+			if !exportedIdent(goName) {
+				v.addf(fieldPath, "name does not make a Go identifier")
+			}
+			if other, ok := seen[goName]; ok {
+				v.addf(fieldPath, "has the same Go name %s as %s", goName, other)
+			}
+			seen[goName] = f.Name
+		}
+	}
+}
+
+// containsItself reports whether a model holds itself by value. Optional fields
+// are pointers and lists and maps are references, so those are fine.
+func (v *validator) containsItself(name string) bool {
+	seen := map[string]bool{}
+	var visit func(string) bool
+	visit = func(current string) bool {
+		m := v.s.Models[current]
+		if m == nil {
+			return false
+		}
+		for _, f := range m.Fields {
+			if f.Optional {
+				continue
+			}
+			if f.Type == name {
+				return true
+			}
+			if !seen[f.Type] {
+				seen[f.Type] = true
+				if visit(f.Type) {
+					return true
+				}
 			}
 		}
+		return false
+	}
+	return visit(name)
+}
+
+func exportedIdent(s string) bool {
+	return token.IsIdentifier(s) && token.IsExported(s)
+}
+
+// concrete checks a subject that generated code publishes to or reads a key
+// from, which a wildcard would never match.
+func (v *validator) concrete(path string, sub Subject) {
+	if sub.HasWildcard() {
+		v.addf(path, "must not hold a wildcard; use a {param} for the variable part")
+	}
+	seen := map[string]string{}
+	for _, p := range sub.Params() {
+		goName := GoName(p)
+		if !exportedIdent(goName) {
+			v.addf(path, "param %q has no Go name", p)
+		}
+		if other, ok := seen[goName]; ok {
+			v.addf(path, "params %s and %s have the same Go name %s", other, p, goName)
+		}
+		seen[goName] = p
+	}
+}
+
+// fixed checks a subject that generated code uses exactly as written.
+func (v *validator) fixed(path, raw string) {
+	sub, err := ParseSubject(raw)
+	switch {
+	case err != nil:
+		v.addf(path, "%v", err)
+	case len(sub.Params()) > 0:
+		v.addf(path, "%s cannot have parameters", raw)
+	default:
+		v.concrete(path, sub)
 	}
 }
 
@@ -101,10 +184,12 @@ func (v *validator) events() {
 		e := v.s.Events[name]
 		path := "events." + name
 		v.model(path+".model", e.Model)
-		if _, err := ParseSubject(e.Subject); err != nil {
+		sub, err := ParseSubject(e.Subject)
+		if err != nil {
 			v.addf(path+".subject", "%v", err)
 			continue
 		}
+		v.concrete(path+".subject", sub)
 		for _, other := range names[i+1:] {
 			if SubjectsOverlap(v.s.EventFilter(name), v.s.EventFilter(other)) {
 				v.addf("events", "%s and %s overlap", name, other)
@@ -118,6 +203,7 @@ func (v *validator) streams() {
 	for i, name := range names {
 		st := v.s.Streams[name]
 		path := "streams." + name
+		v.natsName(path, name)
 		for _, e := range st.Events {
 			if _, ok := v.s.Events[e]; !ok {
 				v.addf(path+".events", "unknown event %q", e)
@@ -155,6 +241,7 @@ func (v *validator) consumers() {
 	for _, name := range SortedKeys(v.s.Consumers) {
 		c := v.s.Consumers[name]
 		path := "consumers." + name
+		v.natsName(path, name)
 		if _, ok := v.s.Streams[c.Stream]; !ok {
 			v.addf(path+".stream", "unknown stream %q", c.Stream)
 		}
@@ -190,15 +277,39 @@ func (v *validator) buckets() {
 	for _, name := range SortedKeys(v.s.KV) {
 		k := v.s.KV[name]
 		path := "kv." + name
+		if !validBucketName(name) {
+			v.addf(path, "name may only hold letters, digits, - and _")
+		}
 		v.model(path+".model", k.Model)
 		if k.Key == "" {
 			v.addf(path+".key", "is required")
-		} else if _, err := ParseSubject(k.Key); err != nil {
+		} else if sub, err := ParseSubject(k.Key); err != nil {
 			v.addf(path+".key", "%v", err)
+		} else {
+			v.concrete(path+".key", sub)
 		}
 		oneOf(v, path+".storage", k.Storage, storageTypes)
 		v.replicas(path+".replicas", k.Replicas)
 	}
+}
+
+// natsName checks the name of a stream or consumer, which NATS puts in subjects.
+func (v *validator) natsName(path, name string) {
+	if strings.ContainsAny(name, ". \t\r\n*>/\\") {
+		v.addf(path, "name must not contain dots, wildcards, spaces or slashes")
+	}
+}
+
+func validBucketName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r != '-' && r != '_' && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func (v *validator) schedules() {
@@ -235,14 +346,19 @@ func (v *validator) schedules() {
 }
 
 func (v *validator) scheduleSubject(path string, x Schedule, ev Event) {
+	v.fixed(path+".subject", x.Subject)
 	if x.Subject == ev.Subject {
 		v.addf(path+".subject", "must differ from the target event's subject")
 	}
-	covered := slices.ContainsFunc(v.s.StreamSubjects(x.Stream), func(p string) bool {
-		return SubjectCovers(p, x.Subject)
-	})
-	if !covered {
-		v.addf(path+".subject", "%s is not covered by stream %s", x.Subject, x.Stream)
+	// Recurring schedules use the subject itself. Delayed messages add a token to
+	// it, so that they never replace each other.
+	for _, subject := range []string{x.Subject, x.Subject + ".id"} {
+		covered := slices.ContainsFunc(v.s.StreamSubjects(x.Stream), func(p string) bool {
+			return SubjectCovers(p, subject)
+		})
+		if !covered {
+			v.addf(path+".subject", "%s is not covered by stream %s", subject, x.Stream)
+		}
 	}
 }
 
@@ -267,19 +383,19 @@ func (v *validator) requests() {
 }
 
 func (v *validator) endpoint(path, name string, e Endpoint) {
-	if !token.IsIdentifier(name) {
-		v.addf(path, "name must be a Go identifier")
+	if !exportedIdent(name) {
+		v.addf(path, "name must be an exported Go identifier")
 	}
 	v.model(path+".request", e.Request)
 	v.model(path+".reply", e.Reply)
 	for _, code := range e.Errors {
-		if !token.IsIdentifier(code) {
-			v.addf(path+".errors", "%q must be a Go identifier", code)
+		if !exportedIdent(code) {
+			v.addf(path+".errors", "%q must be an exported Go identifier", code)
 		}
 	}
+	v.fixed(path+".subject", e.Subject)
 	sub, err := ParseSubject(e.Subject)
 	if err != nil {
-		v.addf(path+".subject", "%v", err)
 		return
 	}
 	for _, ev := range SortedKeys(v.s.Events) {
@@ -342,5 +458,91 @@ func (v *validator) serviceRequests(path string, x Service) {
 		if _, ok := v.s.Requests[group].Endpoints[ep]; !ok {
 			v.addf(path+".calls", "unknown endpoint %q", call)
 		}
+	}
+}
+
+// Names that generated code already declares, in each place a spec name can land.
+var (
+	reservedBuckets   = map[string]bool{"KV": true, "New": true}
+	reservedConsumers = map[string]bool{"Consumers": true, "New": true}
+	// Fields and methods of the generated App.
+	reservedGroups = map[string]bool{"Events": true, "Consumers": true, "KV": true, "Schedules": true, "Runtime": true, "Close": true}
+	// Packages that generated files for a request group sit next to or import.
+	reservedPackages = map[string]bool{"context": true, "json": true, "nuts": true, "events": true, "consumers": true, "kv": true, "schedules": true, "models": true}
+)
+
+// goNames rejects spec names that would produce code that does not compile, or
+// that would silently overwrite another name's generated file.
+func (v *validator) goNames() {
+	v.unique("events", SortedKeys(v.s.Events))
+	v.declared("kv", SortedKeys(v.s.KV), reservedBuckets)
+	v.declared("consumers", SortedKeys(v.s.Consumers), reservedConsumers)
+	v.consumerDeclarations()
+	v.groupNames()
+}
+
+// unique reports names without a Go identifier, or sharing one.
+func (v *validator) unique(section string, names []string) {
+	seen := map[string]string{}
+	for _, name := range names {
+		goName := GoName(name)
+		if !exportedIdent(goName) {
+			v.addf(section+"."+name, "name does not make a Go identifier")
+		}
+		if other, ok := seen[goName]; ok {
+			v.addf(section+"."+name, "has the same Go name %s as %s", goName, other)
+		}
+		seen[goName] = name
+	}
+}
+
+func (v *validator) declared(section string, names []string, reserved map[string]bool) {
+	v.unique(section, names)
+	for _, name := range names {
+		if reserved[GoName(name)] {
+			v.addf(section+"."+name, "Go name %s is reserved", GoName(name))
+		}
+	}
+}
+
+// consumerDeclarations checks the one generated package where consumer and event
+// names share a scope: each consumer declares a type and a handler, and each
+// event it reads declares its parameters and message.
+func (v *validator) consumerDeclarations() {
+	owner := map[string]string{}
+	for _, name := range SortedKeys(v.s.Consumers) {
+		for _, e := range v.s.Consumers[name].Events {
+			for _, suffix := range []string{"Params", "ParamsFrom", "Msg"} {
+				owner[GoName(e)+suffix] = "event " + e
+			}
+		}
+	}
+	for _, name := range SortedKeys(v.s.Consumers) {
+		for _, decl := range []string{GoName(name), GoName(name) + "Handler"} {
+			if other, ok := owner[decl]; ok {
+				v.addf("consumers."+name, "has the same Go name %s as %s", decl, other)
+			}
+			owner[decl] = "consumer " + name
+		}
+	}
+}
+
+func (v *validator) groupNames() {
+	groups := SortedKeys(v.s.Requests)
+	v.declared("requests", groups, reservedGroups)
+	packages := map[string]string{}
+	for _, group := range groups {
+		path := "requests." + group
+		pkg := PackageName(group)
+		switch {
+		case !token.IsIdentifier(pkg):
+			v.addf(path, "name does not make a Go package name")
+		case reservedPackages[pkg]:
+			v.addf(path, "package name %s is reserved", pkg)
+		}
+		if other, ok := packages[pkg]; ok {
+			v.addf(path, "has the same package %s as %s, so one would overwrite the other", pkg, other)
+		}
+		packages[pkg] = group
 	}
 }
