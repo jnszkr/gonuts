@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -28,7 +29,8 @@ const (
 	exitUsage = 2
 )
 
-// Version is set at build time.
+// Version is set at build time. Otherwise it comes from the module version that
+// go install records.
 var Version = "dev"
 
 //go:embed starter.yaml
@@ -88,7 +90,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "schedules":
 		return c.schedules(args[1:])
 	case "version":
-		fmt.Fprintln(stdout, Version)
+		info, _ := debug.ReadBuildInfo()
+		fmt.Fprintln(stdout, resolveVersion(Version, info))
 		return exitOK
 	case "help", "-h", "--help":
 		_, _ = io.WriteString(stdout, usage)
@@ -97,6 +100,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return exitUsage
 	}
+}
+
+func resolveVersion(set string, info *debug.BuildInfo) string {
+	if set != "dev" || info == nil || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return set
+	}
+	return info.Main.Version
 }
 
 type command struct {

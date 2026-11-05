@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -442,5 +443,29 @@ func TestUsageAndVersion(t *testing.T) {
 	}
 	if code, out, _ := run("version"); code != 0 || out == "" {
 		t.Fatalf("version: code %d: %q", code, out)
+	}
+}
+
+func TestVersionComesFromTheBuild(t *testing.T) {
+	info := func(v string) *debug.BuildInfo {
+		return &debug.BuildInfo{Main: debug.Module{Version: v}}
+	}
+	cases := []struct {
+		name, set string
+		build     *debug.BuildInfo
+		want      string
+	}{
+		{"set at build time wins", "v1.0.0", info("v2.0.0"), "v1.0.0"},
+		{"go install", "dev", info("v2.0.0"), "v2.0.0"},
+		{"local build", "dev", info("(devel)"), "dev"},
+		{"no module version", "dev", info(""), "dev"},
+		{"no build info", "dev", nil, "dev"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveVersion(c.set, c.build); got != c.want {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+		})
 	}
 }
