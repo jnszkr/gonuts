@@ -203,6 +203,11 @@ func TestTerraformStopsOnSettingsTheProviderLacks(t *testing.T) {
 			s.KV["carts"] = k
 		},
 		"metadata": func(s *spec.Spec) { k := s.KV["carts"]; k.Metadata = map[string]string{"a": "b"}; s.KV["carts"] = k },
+		"placement.preferred": func(s *spec.Spec) {
+			k := s.KV["carts"]
+			k.Placement = &spec.Placement{Preferred: "n1"}
+			s.KV["carts"] = k
+		},
 	}
 	for field, mutate := range cases {
 		t.Run(field, func(t *testing.T) {
