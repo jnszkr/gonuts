@@ -1,0 +1,35 @@
+# nuts.yaml describes everything this system does on NATS.
+version: 1
+name: myapp
+go:
+  package: myappnats
+
+models:
+  OrderPlaced:
+    fields:
+      id: uuid
+      total_cents: int64
+
+events:
+  order.placed:
+    subject: orders.placed.{region}
+    model: OrderPlaced
+
+streams:
+  ORDERS:
+    events: [order.placed]
+    max_age: 720h
+    replicas: 1
+
+consumers:
+  billing-orders:
+    stream: ORDERS
+    events: [order.placed]
+    max_deliver: 5
+    backoff: [30s, 1m, 5m]
+
+services:
+  checkout:
+    publishes: [order.placed]
+  billing:
+    consumes: [billing-orders]
