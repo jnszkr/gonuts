@@ -1,0 +1,8 @@
+# Mutation testing: `make mutate`. Efficacy is the share of mutants the tests catch.
+silent: false
+unleash:
+  threshold:
+    efficacy: 75
+  timeout-coefficient: 10
+  workers: 4
+  output: ""

@@ -1,0 +1,32 @@
+version: "2"
+linters:
+  enable:
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - gocritic
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - unparam
+    - wrapcheck
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+    wrapcheck:
+      ignore-package-globs:
+        - github.com/jnszkr/gonuts/*
+        - github.com/nats-io/*
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [wrapcheck, unparam]
+      - path: examples/.*/gen/
+        linters: [revive, unparam, wrapcheck]
+formatters:
+  enable:
+    - gofmt
+    - goimports
